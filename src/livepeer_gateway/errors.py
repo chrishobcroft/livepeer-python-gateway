@@ -44,7 +44,19 @@ class SignerRefreshRequired(LivepeerGatewayError):
 
 
 class SkipPaymentCycle(LivepeerGatewayError):
-    """Raised when the signer returns HTTP 482 to skip a payment cycle."""
+    """Raised when the signer returns HTTP 482 to skip a payment cycle.
+
+    A skipped cycle still ADVANCES the session: the signer debits the service
+    consumed since its last update and hands back the new state. Carrying that
+    state here is what lets the caller store it, so the balance runs down and
+    the next cycle mints when it needs to. Dropping it leaves the caller
+    replaying the same state forever, which is a session that never pays again
+    and dies on the orchestrator minutes later.
+    """
+
+    def __init__(self, message: str, *, state: dict | None = None) -> None:
+        super().__init__(message)
+        self.state = state
 
 
 class PaymentError(LivepeerGatewayError):

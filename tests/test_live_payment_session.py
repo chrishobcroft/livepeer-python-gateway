@@ -8,7 +8,9 @@ import pytest
 from livepeer_gateway.errors import (
     LivepeerHTTPError,
     SignerRefreshRequired,
+    SkipPaymentCycle,
 )
+from livepeer_gateway.http import _state_from_body
 from livepeer_gateway.remote_signer import (
     LivePaymentChallenge,
     LivePaymentSession,
@@ -291,3 +293,72 @@ class TestLivePaymentSession:
         assert first.address == "opaque-sender"
         assert first.sig == "opaque-signature"
         assert len(calls) == 1
+
+
+class TestSkippedCycleState:
+    """A 482 from the signer carries the advanced state, and the session keeps it.
+
+    The remote signer is stateless: the balance and the clock travel with the
+    client. If a skipped cycle's state is dropped, the next request replays the
+    old balance, nothing is ever minted again, and the orchestrator releases the
+    session once its credit runs out (livepeer/go-livepeer#4077).
+    """
+
+    def test_state_from_body(self) -> None:
+        body = '{"error": {"message": "no tickets"}, "state": {"state": "two", "sig": "s"}}'
+        assert _state_from_body(body) == {"state": "two", "sig": "s"}
+        assert _state_from_body('{"error": {"message": "no tickets"}}') is None
+        assert _state_from_body("no tickets") is None
+
+    async def test_live_session_keeps_skip_state(self) -> None:
+        calls: list[dict[str, object]] = []
+        replies: list[object] = [
+            {"payment": "p1", "segCreds": "s1", "state": {"state": "one"}},
+            SkipPaymentCycle("skip", state={"state": "two"}),
+            {"payment": "p3", "segCreds": "s3", "state": {"state": "three"}},
+        ]
+
+        async def _post_json(url, payload, *, headers=None, timeout=5.0):
+            calls.append(dict(payload))
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        with mock.patch("livepeer_gateway.http.post_json", side_effect=_post_json):
+            session = LivePaymentSession(
+                "https://signer.example.com", type="live", challenge=_challenge()
+            )
+            await session.get_payment()
+            with pytest.raises(SkipPaymentCycle):
+                await session.get_payment()
+            await session.get_payment()
+
+        assert calls[1]["state"] == {"state": "one"}
+        assert calls[2]["state"] == {"state": "two"}
+
+    async def test_live_session_keeps_state_when_skip_has_none(self) -> None:
+        calls: list[dict[str, object]] = []
+        replies: list[object] = [
+            {"payment": "p1", "segCreds": "s1", "state": {"state": "one"}},
+            SkipPaymentCycle("skip"),
+            {"payment": "p3", "segCreds": "s3", "state": {"state": "three"}},
+        ]
+
+        async def _post_json(url, payload, *, headers=None, timeout=5.0):
+            calls.append(dict(payload))
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        with mock.patch("livepeer_gateway.http.post_json", side_effect=_post_json):
+            session = LivePaymentSession(
+                "https://signer.example.com", type="live", challenge=_challenge()
+            )
+            await session.get_payment()
+            with pytest.raises(SkipPaymentCycle):
+                await session.get_payment()
+            await session.get_payment()
+
+        assert calls[2]["state"] == {"state": "one"}

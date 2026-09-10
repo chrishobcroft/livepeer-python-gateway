@@ -95,6 +95,22 @@ def _json_request_parts(
     return resolved_method, req_headers, body
 
 
+def _state_from_body(body: str) -> dict | None:
+    """The signed state a 482 carries, if it carries one.
+
+    A skipped payment cycle is not a failed one: the signer has debited the
+    service consumed since its last update and handed back new state. Older
+    signers answer with a bare error and no state, so this returns None for
+    those and the caller keeps what it had.
+    """
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    state = data.get("state") if isinstance(data, dict) else None
+    return state if isinstance(state, dict) else None
+
+
 def _raise_http_json_error(
     status: int,
     url: str,
@@ -108,7 +124,8 @@ def _raise_http_json_error(
         )
     if status == 482:
         raise SkipPaymentCycle(
-            f"Signer returned HTTP 482 (skip payment cycle) (url={url}){body_part}"
+            f"Signer returned HTTP 482 (skip payment cycle) (url={url}){body_part}",
+            state=_state_from_body(body),
         )
     raise LivepeerHTTPError(
         status,
@@ -166,7 +183,8 @@ def request_json_sync(
             ) from e
         if e.code == 482:
             raise SkipPaymentCycle(
-                f"Signer returned HTTP 482 (skip payment cycle) (url={url}){body_part}"
+                f"Signer returned HTTP 482 (skip payment cycle) (url={url}){body_part}",
+                state=_state_from_body(raw_body),
             ) from e
         raise LivepeerHTTPError(
             e.code,

@@ -212,7 +212,18 @@ class LivePaymentSession:
             payload["state"] = self._state
 
         headers = dict(self._signer_headers) if self._signer_headers else None
-        data = await post_json(url, payload, headers=headers)
+        try:
+            data = await post_json(url, payload, headers=headers)
+        except SkipPaymentCycle as e:
+            # A SKIPPED CYCLE STILL ADVANCES THE SESSION. This signer keeps no
+            # state of its own -- the balance and the clock travel with us --
+            # so dropping the state it hands back means resending the same
+            # balance every cycle, minting nothing, and being released by the
+            # orchestrator for `insufficient balance` once the upfront credit
+            # runs out. Measured at exactly three minutes.
+            if e.state is not None:
+                self._state = e.state
+            raise
         payment = data.get("payment")
         if not isinstance(payment, str) or not payment:
             raise PaymentError(
